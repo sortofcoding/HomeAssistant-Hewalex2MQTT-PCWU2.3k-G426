@@ -262,6 +262,8 @@ class Hewalex2MQTT(hass.Hass):
     # ---------------------------------------------------------------
     def on_message_serial(self, obj, h, sh, m):
         try:
+    #        Uncommend for debugging and testing:
+    #        self.log(f"Serial msg received: FNC={sh.get('FNC')} h={h} sh={sh}")
             if sh["FNC"] == 0x50:
                 mp = obj.parseRegisters(
                     sh["RestMessage"], sh["RegStart"], sh["RegLen"]
@@ -287,8 +289,8 @@ class Hewalex2MQTT(hass.Hass):
                 self.last_success = time.time()
                 self.offline_reported = False
                 self.set_state("sensor.hewalex_status", state="online")
-                self._last_read_count = len(mp)
-                self._last_new_count = new_values
+                self._last_read_count = getattr(self, "_last_read_count", 0) + len(mp)
+                self._last_new_count = getattr(self, "_last_new_count", 0) + new_values
 
         except Exception as e:
             self.log(f"Serial parse error: {e}")
@@ -342,6 +344,8 @@ class Hewalex2MQTT(hass.Hass):
         if not self._rs485_available():
             self.dlog("readPCWU skipped: RS485 temporarily blocked")
             return
+        self._last_read_count = 0
+        self._last_new_count = 0
         start = time.perf_counter()
         try:
             with self.ser_lock:
@@ -409,6 +413,8 @@ class Hewalex2MQTT(hass.Hass):
         if not self._rs485_available():
             self.dlog("readPcwuConfig skipped: RS485 temporarily blocked")
             return
+        self._last_read_count = 0
+        self._last_new_count = 0
         start = time.perf_counter()
         try:
             with self.ser_lock:
