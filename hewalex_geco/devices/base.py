@@ -1,5 +1,6 @@
 from binascii import hexlify, unhexlify
 import logging
+import time
 
 from ..crc import *
 
@@ -227,6 +228,23 @@ class BaseDevice:
             m = ser.read(winSize)
             self.processAllMessages(s + m)
 
+    def waitForBusQuiet(self, ser, quiet_window=0.05, max_wait=0.5):
+        """Wait for a gap in bus traffic before transmitting, to reduce
+        collisions with the G-426 controller's own ongoing communication
+        with the heat pump on a shared/eavesdropped RS485 bus.
+
+        Returns True if the bus was quiet for one full window before
+        transmitting, False if max_wait was reached without a quiet gap
+        (in which case we transmit anyway rather than waiting forever).
+        """
+        start = time.time()
+        ser.timeout = quiet_window
+        while time.time() - start < max_wait:
+            data = ser.read(100)
+            if not data:
+                return True  # bus has been quiet for one full window
+        return False  # gave up waiting; bus seems continuously busy
+
     def createReadRegistersMessage(self, start, num):
         header = [0x69, self.devHardId, self.conHardId, 0x84, 0, 0]
         payload = [
@@ -262,6 +280,7 @@ class BaseDevice:
         m = self.createReadRegistersMessage(start, num)
         self.logger.debug(f'Reading registers from {start}, count {num}')
         ser.flushInput()
+        self.waitForBusQuiet(ser)
         ser.timeout = 0.4
         ser.write(m)
         r = ser.read(1000)
@@ -283,6 +302,7 @@ class BaseDevice:
         m = self.createWriteRegisterMessage(reg, val)
         self.logger.debug(f'Writing register {reg} = {val}')
         ser.flushInput()
+        self.waitForBusQuiet(ser)
         ser.timeout = 0.4
         ser.write(m)
         r = ser.read(1000)
