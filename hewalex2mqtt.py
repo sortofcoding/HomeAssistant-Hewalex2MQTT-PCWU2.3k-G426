@@ -79,6 +79,9 @@ class Hewalex2MQTT(hass.Hass):
             self.readPcwuConfig_cb, start_config, 600
         )
 
+        if self._diagnostic_dump:
+            self.run_in(self.dumpAllRegisters_cb, 15)
+
         self.log("Config-read interval: 10 min")
 
     def terminate(self):
@@ -112,6 +115,7 @@ class Hewalex2MQTT(hass.Hass):
 
         try:
             self._debug = cfg.getboolean("Pcwu", "DebugLogging", fallback=False)
+            self._diagnostic_dump = cfg.getboolean("Pcwu", "DiagnosticDump", fallback=False)
         except TypeError:
             try:
                 self._debug = cfg.getboolean("Pcwu", "DebugLogging")
@@ -437,3 +441,53 @@ class Hewalex2MQTT(hass.Hass):
             self.log(traceback.format_exc(), level="DEBUG")
             if any(x in msg for x in ["disconnected", "Broken", "reset", "timeout", "filedescriptor out of range", "Could not open port"]):
                 self._handle_rs485_hard_error(msg)
+    
+    def dumpAllRegisters_cb(self, kwargs):
+        self.log("=== Starting full raw register dump (100-536) ===")
+        self._diag_dump = {}
+        try:
+            with self.ser_lock:
+                with serial.serial_for_url(
+                    f"socket://{self._addr}:{self._port}", timeout=5
+                ) as ser:
+                    dev = PCWU(1, 1, 2, 2, self.on_message_diagnostic)
+                    start = dev.REG_MIN_ADR
+                    while start < dev.REG_MAX_ADR:
+                        num = min(dev.REG_MAX_ADR - start, dev.REG_MAX_NUM)
+                        try:
+                            dev.readRegisters(ser, start, num)
+                        except Exception as e:
+                            self.log(f"Dump chunk {start}-{start+num} failed: {e}")
+                        time.sleep(0.3)
+                        start += num
+                time.sleep(0.25)
+        except Exception as e:
+            self.log(f"Diagnostic dump connection error: {e}")
+            self.log(traceback.format_exc(), level="DEBUG")
+            return
+    
+        self.log(f"=== Raw register dump complete - {len(self._diag_dump)} values found ===")
+        for regnum in sorted(self._diag_dump.keys()):
+            raw_unsigned, name = self._diag_dump[regnum]
+            signed = raw_unsigned - 0x10000 if raw_unsigned & 0x8000 else raw_unsigned
+            label = f" -- NAMED: {name}" if name else ""
+            self.log(
+                f"Reg{regnum}: raw={raw_unsigned} signed={signed} "
+                f"(if /10: {signed/10:.1f}){label}"
+            )
+
+    def on_message_diagnostic(self, obj, h, sh, m):
+        try:
+            if sh["FNC"] != 0x50:
+                return
+            regstart = sh["RegStart"]
+            reglen = sh["RegLen"]
+            m2 = sh["RestMessage"]
+            for adr in range(0, min(reglen, len(m2)) - 1, 2):
+                regnum = regstart + adr
+                raw_word = m2[adr] | (m2[adr + 1] << 8)
+                reg_def = obj.registers.get(regnum, None)
+                name = reg_def["name"] if reg_def else None
+                self._diag_dump[regnum] = (raw_word, name)
+        except Exception as e:
+            self.log(f"Diagnostic parse error: {e}")
