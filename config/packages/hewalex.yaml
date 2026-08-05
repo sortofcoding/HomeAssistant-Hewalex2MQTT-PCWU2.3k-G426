@@ -220,7 +220,7 @@ mqtt:
   climate:
     - name: "Heat Pump Floor Temperature"
       unique_id: "hewalex_vloertemp"
-      retain: true
+      retain: false
       modes:
         - "heat"
         - "off"
@@ -240,7 +240,7 @@ mqtt:
 
     - name: "Heat Pump Hysteresis Control"
       unique_id: "hewalex_hysteresis"
-      retain: true
+      retain: false
       modes:
         - "heat"
         - "off"
