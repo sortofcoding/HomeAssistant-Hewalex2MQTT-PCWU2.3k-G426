@@ -520,6 +520,22 @@ class Hewalex2MQTT(hass.Hass):
             signed = raw_unsigned - 0x10000 if raw_unsigned & 0x8000 else raw_unsigned
             self.log(f"Ctrl Reg{regnum}: raw={raw_unsigned} signed={signed} (if /10: {signed/10:.1f})")
 
+    def on_message_diagnostic(self, obj, h, sh, m):
+        try:
+            if sh["FNC"] != 0x50:
+                return
+            regstart = sh["RegStart"]
+            reglen = sh["RegLen"]
+            m2 = sh["RestMessage"]
+            for adr in range(0, min(reglen, len(m2)) - 1, 2):
+                regnum = regstart + adr
+                raw_word = m2[adr] | (m2[adr + 1] << 8)
+                reg_def = obj.registers.get(regnum, None)
+                name = reg_def["name"] if reg_def else None
+                self._diag_dump[regnum] = (raw_word, name)
+        except Exception as e:
+            self.log(f"Diagnostic parse error: {e}")
+    
     def on_message_diagnostic_ctrl(self, obj, h, sh, m):
         try:
             if sh["FNC"] != 0x50:
