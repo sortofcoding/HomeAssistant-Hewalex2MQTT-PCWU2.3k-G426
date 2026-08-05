@@ -84,6 +84,44 @@ class Hewalex2MQTT(hass.Hass):
 
         self.log("Config-read interval: 10 min")
 
+        # write-queue + worker thread  (ONLY in normal mode)
+        if not self._read_only:
+            self.write_queue = {}
+            self.write_lock = threading.Lock()
+            self.write_thread_stop = threading.Event()
+            self.write_thread = threading.Thread(target=self.write_worker, daemon=True)
+            self.write_thread.start()
+
+            # HeatPumpEnabled via listen_state (reliable) instead of paho on_message
+            self.listen_state(
+                self.on_switch_toggle,
+                "input_boolean.warmtepomp_command",
+            )
+            self.log("listen_state registered on input_boolean.warmtepomp_command")
+        else:
+            self.log("Read-only mode: write worker and HA switch listener disabled")
+
+        start_poll = self.datetime() + datetime.timedelta(seconds=5)
+        start_watchdog = self.datetime() + datetime.timedelta(seconds=60)
+        start_config = self.datetime() + datetime.timedelta(seconds=90)
+
+        # Periodic polling (ONLY in normal mode)
+        if not self._read_only:
+            self.poll_handle = self.run_every(self.readPCWU_cb, start_poll, 60)
+            self.config_refresh_handle = self.run_every(
+                self.readPcwuConfig_cb, start_config, 600
+            )
+            self.log("Config-read interval: 10 min")
+        else:
+            self.log("Read-only mode: periodic status/config polling disabled")
+
+        # Watchdog runs in both modes (useful to know if the bus is alive)
+        self.watchdog_handle = self.run_every(self.watchdog_cb, start_watchdog, 60)
+
+        # Diagnostic dump runs in both modes if requested
+        if self._diagnostic_dump:
+            self.run_in(self.dumpAllRegisters_cb, 15)
+
     def terminate(self):
         try:
             self.write_thread_stop.set()
@@ -113,14 +151,13 @@ class Hewalex2MQTT(hass.Hass):
         self._topic = cfg["Pcwu"]["Device_Pcwu_MqttTopic"]
         self._enabled = cfg.getboolean("Pcwu", "Device_Pcwu_Enabled")
 
-        try:
-            self._debug = cfg.getboolean("Pcwu", "DebugLogging", fallback=False)
-            self._diagnostic_dump = cfg.getboolean("Pcwu", "DiagnosticDump", fallback=False)
-        except TypeError:
-            try:
-                self._debug = cfg.getboolean("Pcwu", "DebugLogging")
-            except Exception:
-                self._debug = False
+        # Clean boolean reads with fallbacks
+        self._debug = cfg.getboolean("Pcwu", "DebugLogging", fallback=False)
+        self._diagnostic_dump = cfg.getboolean("Pcwu", "DiagnosticDump", fallback=False)
+        self._read_only = cfg.getboolean("Pcwu", "ReadOnlyMode", fallback=False)
+
+        if self._read_only:
+            self.log("=== READ-ONLY MODE ACTIVE ===")
 
     def dlog(self, msg):
         if getattr(self, "_debug", False):
@@ -162,7 +199,10 @@ class Hewalex2MQTT(hass.Hass):
 
     def on_connect(self, client, userdata, flags, rc):
         self.log(f"MQTT: on_connect rc={rc} - subscribing")
-        client.subscribe(self._topic + "/Command/#", qos=1)
+        if not self._read_only:
+            client.subscribe(self._topic + "/Command/#", qos=1)
+        else:
+            self.log("Read-only mode: skipping Command/# subscription")
 
     def on_disconnect(self, client, userdata, rc):
         if rc != 0:
@@ -176,6 +216,9 @@ class Hewalex2MQTT(hass.Hass):
     # ---------------------------------------------------------------
     def on_message(self, client, userdata, msg):
         try:
+            if self._read_only:
+                return   # silently ignore all command messages
+            
             payload = msg.payload.decode()
             topic = msg.topic.split("/")
             if len(topic) == 3 and topic[0] == self._topic and topic[1] == "Command":
@@ -209,6 +252,9 @@ class Hewalex2MQTT(hass.Hass):
     # listen_state handler - HeatPumpEnabled via input_boolean
     # ---------------------------------------------------------------
     def on_switch_toggle(self, entity, attribute, old, new, kwargs):
+        if self._read_only:
+            return
+            
         if new in ("on", "off"):
             payload = "True" if new == "on" else "False"
             self.log(f"Switch toggle via listen_state: HeatPumpEnabled -> {payload}")
@@ -221,6 +267,9 @@ class Hewalex2MQTT(hass.Hass):
     def write_worker(self):
         while not self.write_thread_stop.is_set():
             try:
+                if self._read_only:
+                    time.sleep(1.0)
+                    continue
                 item = None
                 with self.write_lock:
                     if self.write_queue:
@@ -376,6 +425,9 @@ class Hewalex2MQTT(hass.Hass):
                 t.start()
 
     def writePcwuConfig(self, reg, payload):
+        if self._read_only:
+            self.log(f"Write {reg}={payload} blocked: read-only mode")
+            return
         """Write register to Hewalex with lock, rest pause and clear logging."""
         if not self._rs485_available():
             self.log(f"Write {reg}={payload} skipped: RS485 temporarily blocked")
