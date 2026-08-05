@@ -31,3 +31,8 @@ Timeout = 1
 ; Set to True to enable verbose DEBUG logging in AppDaemon
 DebugLogging = False
 DiagnosticDump = False
+; Set to True to disable ALL writes and periodic polling.
+; Use this for diagnostic work: change settings on the controller,
+; restart AppDaemon, and read the values back without the app
+; overwriting them via retained MQTT messages.
+ReadOnlyMode = False
