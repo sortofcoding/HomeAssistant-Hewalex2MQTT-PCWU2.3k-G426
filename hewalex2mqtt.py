@@ -465,60 +465,43 @@ class Hewalex2MQTT(hass.Hass):
                 self._handle_rs485_hard_error(msg)
     
     def dumpAllRegisters_cb(self, kwargs):
-        # Existing dump from executive module (address 2)
-        self.log("=== Dump from executive module (addr 2) ===")
-        self._diag_dump = {}
+        self.log("=== Starting eavesdrop (60 seconds) ===")
+        self._eaves_data = {}
         try:
             with self.ser_lock:
                 with serial.serial_for_url(
                     f"socket://{self._addr}:{self._port}", timeout=5
                 ) as ser:
-                    dev = PCWU(1, 1, 2, 2, self.on_message_diagnostic)
-                    start = dev.REG_MIN_ADR
-                    while start < dev.REG_MAX_ADR:
-                        num = min(dev.REG_MAX_ADR - start, dev.REG_MAX_NUM)
-                        try:
-                            dev.readRegisters(ser, start, num)
-                        except Exception as e:
-                            self.log(f"Dump chunk {start}-{start+num} failed: {e}")
-                        time.sleep(0.3)
-                        start += num
+                    dev = PCWU(1, 1, 2, 2, self.on_message_eaves)
+                    # Eavesdrop for ~60 seconds or 150 cycles
+                    dev.eavesDrop(ser, numCycles=150)
         except Exception as e:
-            self.log(f"Device dump error: {e}")
+            self.log(f"Eavesdrop error: {e}")
+            self.log(traceback.format_exc(), level="DEBUG")
 
-        self.log(f"=== Device dump: {len(self._diag_dump)} values ===")
-        for regnum in sorted(self._diag_dump.keys()):
-            raw_unsigned, name = self._diag_dump[regnum]
+        self.log(f"=== Eavesdrop complete - {len(self._eaves_data)} unique registers seen ===")
+        for regnum in sorted(self._eaves_data.keys()):
+            raw_unsigned, src = self._eaves_data[regnum]
             signed = raw_unsigned - 0x10000 if raw_unsigned & 0x8000 else raw_unsigned
-            label = f" -- NAMED: {name}" if name else ""
-            self.log(f"Dev Reg{regnum}: raw={raw_unsigned} signed={signed} (if /10: {signed/10:.1f}){label}")
+            self.log(f"Eaves Reg{regnum}: raw={raw_unsigned} signed={signed} (if /10: {signed/10:.1f}) [{src}]")
 
-        # NEW: Try reading from controller (address 1) as device
-        self.log("=== Dump from controller (addr 1) ===")
-        self._diag_dump_ctrl = {}
+    def on_message_eaves(self, obj, h, sh, m):
         try:
-            with self.ser_lock:
-                with serial.serial_for_url(
-                    f"socket://{self._addr}:{self._port}", timeout=5
-                ) as ser:
-                    ctrl = PCWU(2, 2, 1, 1, self.on_message_diagnostic_ctrl)
-                    start = ctrl.REG_MIN_ADR
-                    while start < ctrl.REG_MAX_ADR:
-                        num = min(ctrl.REG_MAX_ADR - start, ctrl.REG_MAX_NUM)
-                        try:
-                            ctrl.readRegisters(ser, start, num)
-                        except Exception as e:
-                            self.log(f"Ctrl dump chunk {start}-{start+num} failed: {e}")
-                        time.sleep(0.3)
-                        start += num
+            if sh["FNC"] == 0x50:
+                regstart = sh["RegStart"]
+                reglen = sh["RegLen"]
+                m2 = sh["RestMessage"]
+                for adr in range(0, min(reglen, len(m2)) - 1, 2):
+                    regnum = regstart + adr
+                    raw_word = m2[adr] | (m2[adr + 1] << 8)
+                    src = "CTRL" if h["From"] == 1 else "DEV"
+                    self._eaves_data[regnum] = (raw_word, src)
+            elif sh["FNC"] == 0x60:
+                # Write acknowledgement - log it!
+                regstart = sh["RegStart"]
+                self.log(f"EAVES: Write ACK detected at reg {regstart}")
         except Exception as e:
-            self.log(f"Controller dump error: {e}")
-
-        self.log(f"=== Controller dump: {len(self._diag_dump_ctrl)} values ===")
-        for regnum in sorted(self._diag_dump_ctrl.keys()):
-            raw_unsigned, name = self._diag_dump_ctrl[regnum]
-            signed = raw_unsigned - 0x10000 if raw_unsigned & 0x8000 else raw_unsigned
-            self.log(f"Ctrl Reg{regnum}: raw={raw_unsigned} signed={signed} (if /10: {signed/10:.1f})")
+            self.log(f"Eaves parse error: {e}")
 
     def on_message_diagnostic(self, obj, h, sh, m):
         try:
