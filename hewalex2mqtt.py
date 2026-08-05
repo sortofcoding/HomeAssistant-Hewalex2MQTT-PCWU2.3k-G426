@@ -465,7 +465,8 @@ class Hewalex2MQTT(hass.Hass):
                 self._handle_rs485_hard_error(msg)
     
     def dumpAllRegisters_cb(self, kwargs):
-        self.log("=== Starting full raw register dump (100-536) ===")
+        # Existing dump from executive module (address 2)
+        self.log("=== Dump from executive module (addr 2) ===")
         self._diag_dump = {}
         try:
             with self.ser_lock:
@@ -482,23 +483,44 @@ class Hewalex2MQTT(hass.Hass):
                             self.log(f"Dump chunk {start}-{start+num} failed: {e}")
                         time.sleep(0.3)
                         start += num
-                time.sleep(0.25)
         except Exception as e:
-            self.log(f"Diagnostic dump connection error: {e}")
-            self.log(traceback.format_exc(), level="DEBUG")
-            return
-    
-        self.log(f"=== Raw register dump complete - {len(self._diag_dump)} values found ===")
+            self.log(f"Device dump error: {e}")
+
+        self.log(f"=== Device dump: {len(self._diag_dump)} values ===")
         for regnum in sorted(self._diag_dump.keys()):
             raw_unsigned, name = self._diag_dump[regnum]
             signed = raw_unsigned - 0x10000 if raw_unsigned & 0x8000 else raw_unsigned
             label = f" -- NAMED: {name}" if name else ""
-            self.log(
-                f"Reg{regnum}: raw={raw_unsigned} signed={signed} "
-                f"(if /10: {signed/10:.1f}){label}"
-            )
+            self.log(f"Dev Reg{regnum}: raw={raw_unsigned} signed={signed} (if /10: {signed/10:.1f}){label}")
 
-    def on_message_diagnostic(self, obj, h, sh, m):
+        # NEW: Try reading from controller (address 1) as device
+        self.log("=== Dump from controller (addr 1) ===")
+        self._diag_dump_ctrl = {}
+        try:
+            with self.ser_lock:
+                with serial.serial_for_url(
+                    f"socket://{self._addr}:{self._port}", timeout=5
+                ) as ser:
+                    ctrl = PCWU(2, 2, 1, 1, self.on_message_diagnostic_ctrl)
+                    start = ctrl.REG_MIN_ADR
+                    while start < ctrl.REG_MAX_ADR:
+                        num = min(ctrl.REG_MAX_ADR - start, ctrl.REG_MAX_NUM)
+                        try:
+                            ctrl.readRegisters(ser, start, num)
+                        except Exception as e:
+                            self.log(f"Ctrl dump chunk {start}-{start+num} failed: {e}")
+                        time.sleep(0.3)
+                        start += num
+        except Exception as e:
+            self.log(f"Controller dump error: {e}")
+
+        self.log(f"=== Controller dump: {len(self._diag_dump_ctrl)} values ===")
+        for regnum in sorted(self._diag_dump_ctrl.keys()):
+            raw_unsigned, name = self._diag_dump_ctrl[regnum]
+            signed = raw_unsigned - 0x10000 if raw_unsigned & 0x8000 else raw_unsigned
+            self.log(f"Ctrl Reg{regnum}: raw={raw_unsigned} signed={signed} (if /10: {signed/10:.1f})")
+
+    def on_message_diagnostic_ctrl(self, obj, h, sh, m):
         try:
             if sh["FNC"] != 0x50:
                 return
@@ -508,8 +530,6 @@ class Hewalex2MQTT(hass.Hass):
             for adr in range(0, min(reglen, len(m2)) - 1, 2):
                 regnum = regstart + adr
                 raw_word = m2[adr] | (m2[adr + 1] << 8)
-                reg_def = obj.registers.get(regnum, None)
-                name = reg_def["name"] if reg_def else None
-                self._diag_dump[regnum] = (raw_word, name)
+                self._diag_dump_ctrl[regnum] = (raw_word, None)
         except Exception as e:
             self.log(f"Diagnostic parse error: {e}")
