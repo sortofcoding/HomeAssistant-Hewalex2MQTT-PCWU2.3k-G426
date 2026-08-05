@@ -53,37 +53,6 @@ class Hewalex2MQTT(hass.Hass):
         self.dev = PCWU(1, 1, 2, 2, self.on_message_serial)
         self.start_mqtt()
 
-        # write-queue + worker thread
-        self.write_queue = {}
-        self.write_lock = threading.Lock()
-        self.write_thread_stop = threading.Event()
-        self.write_thread = threading.Thread(target=self.write_worker, daemon=True)
-        self.write_thread.start()
-
-        # HeatPumpEnabled commands via listen_state (reliable) instead of paho on_message
-        # Requires an input_boolean.warmtepomp_command helper in HA
-        # and an automation that mirrors switch.warmtepomp_aan_switch to the boolean
-        self.listen_state(
-            self.on_switch_toggle,
-            "input_boolean.warmtepomp_command",
-        )
-        self.log("listen_state registered on input_boolean.warmtepomp_command")
-
-        start_poll = self.datetime() + datetime.timedelta(seconds=5)
-        start_watchdog = self.datetime() + datetime.timedelta(seconds=60)
-        start_config = self.datetime() + datetime.timedelta(seconds=90)
-
-        self.poll_handle = self.run_every(self.readPCWU_cb, start_poll, 60)
-        self.watchdog_handle = self.run_every(self.watchdog_cb, start_watchdog, 60)
-        self.config_refresh_handle = self.run_every(
-            self.readPcwuConfig_cb, start_config, 600
-        )
-
-        if self._diagnostic_dump:
-            self.run_in(self.dumpAllRegisters_cb, 15)
-
-        self.log("Config-read interval: 10 min")
-
         # write-queue + worker thread  (ONLY in normal mode)
         if not self._read_only:
             self.write_queue = {}
@@ -123,10 +92,11 @@ class Hewalex2MQTT(hass.Hass):
             self.run_in(self.dumpAllRegisters_cb, 15)
 
     def terminate(self):
-        try:
-            self.write_thread_stop.set()
-        except Exception:
-            pass
+        if hasattr(self, "write_thread_stop"):
+            try:
+                self.write_thread_stop.set()
+            except Exception:
+                pass
         try:
             self.client.loop_stop()
             self.client.disconnect()
@@ -425,10 +395,10 @@ class Hewalex2MQTT(hass.Hass):
                 t.start()
 
     def writePcwuConfig(self, reg, payload):
+        """Write register to Hewalex with lock, rest pause and clear logging."""
         if self._read_only:
             self.log(f"Write {reg}={payload} blocked: read-only mode")
             return
-        """Write register to Hewalex with lock, rest pause and clear logging."""
         if not self._rs485_available():
             self.log(f"Write {reg}={payload} skipped: RS485 temporarily blocked")
             return
