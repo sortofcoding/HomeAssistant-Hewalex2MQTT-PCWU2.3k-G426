@@ -30,3 +30,4 @@ Stopbits = 1
 Timeout = 1
 ; Set to True to enable verbose DEBUG logging in AppDaemon
 DebugLogging = False
+DiagnosticDump = False
