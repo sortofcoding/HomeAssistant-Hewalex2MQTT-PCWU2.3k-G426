@@ -465,79 +465,38 @@ class Hewalex2MQTT(hass.Hass):
                 self._handle_rs485_hard_error(msg)
     
     def dumpAllRegisters_cb(self, kwargs):
-        self.log("=== Starting raw eavesdrop (5 minutes) ===")
-        self._eaves_data = {}
-        self._eaves_writes = []
-        leftover = b""
-
+        self.log("=== Starting full raw register dump (100-536) ===")
+        self._diag_dump = {}
         try:
             with self.ser_lock:
                 with serial.serial_for_url(
                     f"socket://{self._addr}:{self._port}", timeout=5
                 ) as ser:
-                    ser.flushInput()
-                    start = time.time()
-                    while time.time() - start < 300:  # 5 minutes
-                        ser.timeout = 0.5
-                        chunk = ser.read(500)
-                        if chunk:
-                            data = leftover + chunk
-                            try:
-                                leftover = self.dev.processAllMessages(data, returnRemainingBytes=True)
-                            except Exception as e:
-                                # Corrupted frame — skip ahead to next 0x69 start byte
-                                next_start = data.find(b'\x69', 1)
-                                if next_start > 0:
-                                    leftover = data[next_start:]
-                                else:
-                                    leftover = b""
-                        else:
-                            # No data for 0.5s — bus quiet, reset leftover
-                            leftover = b""
+                    dev = PCWU(1, 1, 2, 2, self.on_message_diagnostic)
+                    start = dev.REG_MIN_ADR
+                    while start < dev.REG_MAX_ADR:
+                        num = min(dev.REG_MAX_ADR - start, dev.REG_MAX_NUM)
+                        try:
+                            dev.readRegisters(ser, start, num)
+                        except Exception as e:
+                            self.log(f"Dump chunk {start}-{start+num} failed: {e}")
+                        time.sleep(0.3)
+                        start += num
+                time.sleep(0.25)
         except Exception as e:
-            self.log(f"Eavesdrop error: {e}")
+            self.log(f"Diagnostic dump connection error: {e}")
             self.log(traceback.format_exc(), level="DEBUG")
+            return
 
-        self.log(f"=== Eavesdrop complete - {len(self._eaves_data)} unique registers seen ===")
-        for regnum in sorted(self._eaves_data.keys()):
-            raw_unsigned, src = self._eaves_data[regnum]
+        self.log(f"=== Raw register dump complete - {len(self._diag_dump)} values found ===")
+        for regnum in sorted(self._diag_dump.keys()):
+            raw_unsigned, name = self._diag_dump[regnum]
             signed = raw_unsigned - 0x10000 if raw_unsigned & 0x8000 else raw_unsigned
-            self.log(f"Eaves Reg{regnum}: raw={raw_unsigned} signed={signed} (if /10: {signed/10:.1f}) [{src}]")
-
-        if self._eaves_writes:
-            self.log(f"=== Write commands captured: {len(self._eaves_writes)} ===")
-            for w in self._eaves_writes:
-                self.log(f"WRITE: reg={w['reg']} val={w['val']} from={w['from']}")
-
-    def on_message_eaves(self, obj, h, sh, m):
-        try:
-            src = "CTRL" if h["From"] == 1 else "DEV"
-            fnc = sh["FNC"]
-
-            if fnc == 0x50:
-                regstart = sh["RegStart"]
-                reglen = sh["RegLen"]
-                m2 = sh["RestMessage"]
-                for adr in range(0, min(reglen, len(m2)) - 1, 2):
-                    regnum = regstart + adr
-                    raw_word = m2[adr] | (m2[adr + 1] << 8)
-                    self._eaves_data[regnum] = (raw_word, src)
-
-            elif fnc == 0x60:
-                regstart = sh["RegStart"]
-                reglen = sh["RegLen"]
-                m2 = sh["RestMessage"]
-                if len(m2) >= 2:
-                    val = m2[0] | (m2[1] << 8)
-                    self._eaves_writes.append({
-                        "reg": regstart,
-                        "val": val,
-                        "from": src,
-                    })
-                    self.log(f"EAVES WRITE CAPTURED: reg={regstart} val={val} from={src}")
-
-        except Exception as e:
-            self.log(f"Eaves parse error: {e}")
+            label = f" -- NAMED: {name}" if name else ""
+            self.log(
+                f"Reg{regnum}: raw={raw_unsigned} signed={signed} "
+                f"(if /10: {signed/10:.1f}){label}"
+            )
 
     def on_message_diagnostic(self, obj, h, sh, m):
         try:
@@ -552,19 +511,5 @@ class Hewalex2MQTT(hass.Hass):
                 reg_def = obj.registers.get(regnum, None)
                 name = reg_def["name"] if reg_def else None
                 self._diag_dump[regnum] = (raw_word, name)
-        except Exception as e:
-            self.log(f"Diagnostic parse error: {e}")
-    
-    def on_message_diagnostic_ctrl(self, obj, h, sh, m):
-        try:
-            if sh["FNC"] != 0x50:
-                return
-            regstart = sh["RegStart"]
-            reglen = sh["RegLen"]
-            m2 = sh["RestMessage"]
-            for adr in range(0, min(reglen, len(m2)) - 1, 2):
-                regnum = regstart + adr
-                raw_word = m2[adr] | (m2[adr + 1] << 8)
-                self._diag_dump_ctrl[regnum] = (raw_word, None)
         except Exception as e:
             self.log(f"Diagnostic parse error: {e}")
